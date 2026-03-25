@@ -2,7 +2,7 @@
   <img src="assets/icon.png" alt="OpenTextSniper" width="128">
 </p>
 
-<h1 align="center">OpenTextSniper</h1>
+<h1 align="center">OpenTextGrabber</h1>
 
 <p align="center">Free, open-source screen OCR for macOS. Select any region on your screen and instantly copy the text to your clipboard.</p>
 
