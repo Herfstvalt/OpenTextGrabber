@@ -14,6 +14,8 @@ class ScreenCapture {
     private static var overlayWindows: [NSWindow] = []
     private static var completion: ((CGImage?) -> Void)?
     private static var escapeMonitor: Any?
+    private static var cursorRefreshTimer: Timer?
+    private static var activationObserver: NSObjectProtocol?
     private static var isActive = false
 
     static func beginSelection(completion: @escaping (CGImage?) -> Void) {
@@ -21,6 +23,7 @@ class ScreenCapture {
         isActive = true
         self.completion = completion
 
+        var windowUnderPointer: NSWindow?
         for screen in NSScreen.screens {
             let window = OverlayWindow(
                 contentRect: screen.frame,
@@ -38,41 +41,65 @@ class ScreenCapture {
             let view = SelectionView(frame: NSRect(origin: .zero, size: screen.frame.size))
             window.contentView = view
 
-            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
             window.makeFirstResponder(view)
             overlayWindows.append(window)
-        }
-
-        NSApp.activate(ignoringOtherApps: true)
-
-        // Force crosshair cursor immediately by pushing it onto the cursor stack
-        // and generating a synthetic mouse-moved event to trigger cursor rect update
-        NSCursor.crosshair.push()
-        NSCursor.crosshair.set()
-        if let loc = NSEvent.mouseLocation as NSPoint? {
-            for window in overlayWindows {
-                window.invalidateCursorRects(for: window.contentView!)
+            if screen.frame.contains(NSEvent.mouseLocation) {
+                windowUnderPointer = window
             }
-            // Synthetic mouse-moved event forces macOS to re-evaluate cursor rects
-            let screen = NSScreen.main ?? NSScreen.screens[0]
-            let flippedY = screen.frame.height - loc.y
-            CGWarpMouseCursorPosition(CGPoint(x: loc.x, y: flippedY))
         }
 
-        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if event.keyCode == 53 {
+        // Activation and cursor-rectangle updates can run after the hotkey handler.
+        // Reapply the cursor when activation finishes, without moving the pointer.
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: NSApp, queue: .main
+        ) { _ in
+            refreshSelectionCursor()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        (windowUnderPointer ?? overlayWindows.first)?.makeKeyAndOrderFront(nil)
+        refreshSelectionCursor()
+        DispatchQueue.main.async { refreshSelectionCursor() }
+
+        // WindowServer may restore the previous app's cursor after activation,
+        // even while the pointer is stationary. Own it for this selection only.
+        let timer = Timer(timeInterval: 0.05, repeats: true) { _ in
+            guard isActive else { return }
+            NSCursor.crosshair.set()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        cursorRefreshTimer = timer
+
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { event in
+            if event.type == .keyDown && event.keyCode == 53 {
                 endSelection(rect: nil)
                 return nil
             }
+            refreshSelectionCursor()
             return event
         }
+    }
+
+    private static func refreshSelectionCursor() {
+        guard isActive else { return }
+        for window in overlayWindows {
+            if let view = window.contentView {
+                window.invalidateCursorRects(for: view)
+            }
+        }
+        NSCursor.crosshair.set()
     }
 
     static func endSelection(rect: NSRect?) {
         guard isActive else { return }
         isActive = false
+        cursorRefreshTimer?.invalidate()
+        cursorRefreshTimer = nil
 
-        NSCursor.pop()
+        if let observer = activationObserver {
+            NotificationCenter.default.removeObserver(observer)
+            activationObserver = nil
+        }
         NSCursor.arrow.set()
 
         if let monitor = escapeMonitor {
@@ -148,6 +175,7 @@ class ScreenCapture {
 class SelectionView: NSView {
     private var startPoint: NSPoint?
     private var currentPoint: NSPoint?
+    private var selectionTrackingArea: NSTrackingArea?
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -158,6 +186,38 @@ class SelectionView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.invalidateCursorRects(for: self)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let area = selectionTrackingArea {
+            removeTrackingArea(area)
+        }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.cursorUpdate, .mouseEnteredAndExited, .mouseMoved,
+                      .activeAlways, .inVisibleRect, .enabledDuringMouseDrag],
+            owner: self, userInfo: nil
+        )
+        addTrackingArea(area)
+        selectionTrackingArea = area
+    }
+
+    private func showSelectionCursor() {
+        guard window?.isVisible == true else { return }
+        NSCursor.crosshair.set()
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        showSelectionCursor()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        showSelectionCursor()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        showSelectionCursor()
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -213,12 +273,14 @@ class SelectionView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        showSelectionCursor()
         startPoint = convert(event.locationInWindow, from: nil)
         currentPoint = startPoint
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
+        showSelectionCursor()
         currentPoint = convert(event.locationInWindow, from: nil)
         needsDisplay = true
     }

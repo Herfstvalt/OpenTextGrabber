@@ -86,3 +86,43 @@ This project was inspired by [TextSniper](https://textsniper.app/). Full kudos t
 ## License
 
 MIT
+
+
+## Capture options
+
+Two independently saved options are available in the menu bar:
+
+- **Read QR Codes**: decode QR payloads before OCR. A detected payload takes priority over nearby text. URL queries and fragments are preserved, and links are never opened automatically. Multiple QR payloads are separated by newlines. Turn this off to use text recognition only.
+- **Copy Text as Single Line**: join all recognized lines and paragraphs with spaces. Turn this off to preserve the original line/paragraph formatting. This is off by default in the upstream contribution so existing users keep their preferred formatting.
+
+Line grouping uses the left edge, so a short final line stays in its paragraph.
+Selection overlays keep the crosshair through app activation, pointer movement,
+dragging, and release of the shortcut modifiers, without warping the pointer.
+A short-lived cursor refresh timer covers delayed WindowServer cursor changes and
+is invalidated as soon as selection ends.
+
+### Recognition checks
+
+```sh
+mkdir -p build
+swiftc -swift-version 5 -module-cache-path build/ModuleCache \
+  -framework Cocoa -framework Vision -framework CoreImage \
+  Sources/OCREngine.swift Tests/main.swift -o build/recognition-tests
+./build/recognition-tests
+```
+
+### Cursor regression checks
+
+```sh
+swiftc -swift-version 5 -module-cache-path build/ModuleCache \
+  -framework Cocoa -framework ScreenCaptureKit \
+  Sources/ScreenCapture.swift Tests/Cursor/main.swift -o build/cursor-tests
+./build/cursor-tests
+```
+
+The cursor checks briefly show selection overlays and cancel them without capturing
+screen images. Also try the capture shortcut from another app with the mouse
+stationary, release the modifiers, drag across each display, and cancel using Escape
+or a right-click. The crosshair should remain visible during selection and return
+to the arrow after cancellation. The menu action checks are in `Tests/Menu/main.swift`;
+compile with the app sources except `Sources/main.swift`.
