@@ -2,31 +2,42 @@ import Vision
 import CoreGraphics
 
 enum OCREngine {
-    static func recognizeText(in image: CGImage, completion: @escaping (Result<String, Error>) -> Void) {
-        let request = VNRecognizeTextRequest { request, error in
-            if let error = error {
-                completion(.failure(error))
-                return
-            }
+    struct Options {
+        var scanQRCodes = true
+        var joinLines = false
+    }
 
-            guard let observations = request.results as? [VNRecognizedTextObservation],
-                  !observations.isEmpty else {
-                completion(.success(""))
-                return
-            }
-
-            let text = formatObservations(observations)
-            completion(.success(text))
-        }
-
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
-
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
-
+    static func recognizeText(in image: CGImage, options: Options = Options(), completion: @escaping (Result<String, Error>) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try handler.perform([request])
+                let handler = VNImageRequestHandler(cgImage: image, options: [:])
+                if options.scanQRCodes {
+                    // Decode QR payloads before OCR so nearby labels never replace the URL.
+                    let barcodeRequest = VNDetectBarcodesRequest()
+                    barcodeRequest.symbologies = [.qr]
+                    try handler.perform([barcodeRequest])
+
+                    let codes = (barcodeRequest.results ?? []).sorted {
+                        if abs($0.boundingBox.midY - $1.boundingBox.midY) > 0.02 {
+                            return $0.boundingBox.midY > $1.boundingBox.midY
+                        }
+                        return $0.boundingBox.minX < $1.boundingBox.minX
+                    }
+                    let payloads = codes.compactMap { $0.payloadStringValue }
+                        .filter { !$0.isEmpty }
+                    if !payloads.isEmpty {
+                        // Preserve each payload exactly, including URL query strings.
+                        completion(.success(payloads.joined(separator: "\n")))
+                        return
+                    }
+
+                }
+
+                let textRequest = VNRecognizeTextRequest()
+                textRequest.recognitionLevel = .accurate
+                textRequest.usesLanguageCorrection = true
+                try handler.perform([textRequest])
+                completion(.success(formatObservations(textRequest.results ?? [], joinLines: options.joinLines)))
             } catch {
                 completion(.failure(error))
             }
@@ -35,7 +46,7 @@ enum OCREngine {
 
     // MARK: - Smart Formatting
 
-    private static func formatObservations(_ observations: [VNRecognizedTextObservation]) -> String {
+    private static func formatObservations(_ observations: [VNRecognizedTextObservation], joinLines: Bool) -> String {
         // Extract text with bounding boxes
         // Vision bounding box: origin at bottom-left, normalized 0-1
         let lines: [(text: String, box: CGRect)] = observations.compactMap { obs in
@@ -54,30 +65,30 @@ enum OCREngine {
         for column in columns {
             // Sort top-to-bottom (higher Y = higher on screen in Vision coords)
             let sorted = column.sorted { $0.box.midY > $1.box.midY }
-            let formatted = formatColumn(sorted)
+            let formatted = formatColumn(sorted, joinLines: joinLines)
             columnTexts.append(formatted)
         }
 
-        return columnTexts.joined(separator: "\n\n")
+        return columnTexts.joined(separator: joinLines ? " " : "\n\n")
     }
 
     private static func detectColumns(_ lines: [(text: String, box: CGRect)]) -> [[(text: String, box: CGRect)]] {
         guard lines.count > 1 else { return [lines] }
 
-        // Cluster lines by horizontal center (midX)
-        // Use a simple threshold: if midX values are far apart, it's a different column
-        let sorted = lines.sorted { $0.box.midX < $1.box.midX }
+        // Cluster lines by left edge (minX), so short lines stay in their paragraph
+        // Use a simple threshold: if minX values are far apart, it's a different column
+        let sorted = lines.sorted { $0.box.minX < $1.box.minX }
 
         var columns: [[(text: String, box: CGRect)]] = [[sorted[0]]]
         let columnThreshold: CGFloat = 0.25 // 25% of image width
 
         for i in 1..<sorted.count {
-            let currentMidX = sorted[i].box.midX
-            let lastColumnMidX = columns[columns.count - 1]
-                .map { $0.box.midX }
+            let currentMinX = sorted[i].box.minX
+            let lastColumnMinX = columns[columns.count - 1]
+                .map { $0.box.minX }
                 .reduce(0, +) / CGFloat(columns[columns.count - 1].count)
 
-            if abs(currentMidX - lastColumnMidX) > columnThreshold {
+            if abs(currentMinX - lastColumnMinX) > columnThreshold {
                 columns.append([sorted[i]])
             } else {
                 columns[columns.count - 1].append(sorted[i])
@@ -86,13 +97,18 @@ enum OCREngine {
 
         // Sort columns left-to-right
         return columns.sorted { col1, col2 in
-            let avg1 = col1.map { $0.box.midX }.reduce(0, +) / CGFloat(col1.count)
-            let avg2 = col2.map { $0.box.midX }.reduce(0, +) / CGFloat(col2.count)
+            let avg1 = col1.map { $0.box.minX }.reduce(0, +) / CGFloat(col1.count)
+            let avg2 = col2.map { $0.box.minX }.reduce(0, +) / CGFloat(col2.count)
             return avg1 < avg2
         }
     }
 
-    private static func formatColumn(_ lines: [(text: String, box: CGRect)]) -> String {
+    private static func formatColumn(_ lines: [(text: String, box: CGRect)], joinLines: Bool) -> String {
+        if joinLines {
+            return lines.flatMap { $0.text.split(whereSeparator: { $0.isWhitespace }) }
+                .joined(separator: " ")
+        }
+
         guard !lines.isEmpty else { return "" }
         guard lines.count > 1 else { return lines[0].text }
 

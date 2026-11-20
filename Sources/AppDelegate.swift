@@ -30,6 +30,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        UserDefaults.standard.register(defaults: [
+            "scanQRCodes": true,
+            "joinCapturedLines": false,
+        ])
         checkScreenCapturePermission()
 
         ClipboardHistory.shared.load()
@@ -79,9 +83,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Capture
         let hotkeyStr = HotkeyManager.shared.displayString()
-        let captureItem = NSMenuItem(title: "Capture Text", action: #selector(captureText), keyEquivalent: "")
+        let captureItem = NSMenuItem(title: "Capture Text or QR Code", action: #selector(captureText), keyEquivalent: "")
         captureItem.attributedTitle = attributedMenuItem(
-            title: "Capture Text", shortcut: hotkeyStr
+            title: "Capture Text or QR Code", shortcut: hotkeyStr
         )
         menu.addItem(captureItem)
 
@@ -103,6 +107,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
         }
 
+        menu.addItem(.separator())
+
+        // Capture preferences. Changes apply to the next selection.
+        let qrItem = NSMenuItem(title: "Read QR Codes", action: #selector(toggleQRCodes), keyEquivalent: "")
+        qrItem.target = self
+        qrItem.state = UserDefaults.standard.bool(forKey: "scanQRCodes") ? .on : .off
+        menu.addItem(qrItem)
+
+        let linesItem = NSMenuItem(title: "Copy Text as Single Line", action: #selector(toggleJoinLines), keyEquivalent: "")
+        linesItem.target = self
+        linesItem.state = UserDefaults.standard.bool(forKey: "joinCapturedLines") ? .on : .off
+        menu.addItem(linesItem)
         menu.addItem(.separator())
 
         // Preferences
@@ -133,9 +149,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Close the menu if open
         statusItem.menu?.cancelTracking()
 
+        let options = OCREngine.Options(
+            scanQRCodes: UserDefaults.standard.bool(forKey: "scanQRCodes"),
+            joinLines: UserDefaults.standard.bool(forKey: "joinCapturedLines")
+        )
         ScreenCapture.beginSelection { [weak self] image in
             guard let image = image else { return }
-            OCREngine.recognizeText(in: image) { result in
+            OCREngine.recognizeText(in: image, options: options) { result in
                 DispatchQueue.main.async {
                     switch result {
                     case .success(let text) where !text.isEmpty:
@@ -145,13 +165,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         NSSound(named: "Tink")?.play()
                         self?.showToast("Copied to clipboard!", style: .success)
                     case .success:
-                        self?.showToast("No text found", style: .info)
+                        self?.showToast("No text or QR code found", style: .info)
                     case .failure:
-                        self?.showToast("OCR failed", style: .error)
+                        self?.showToast("Text / QR recognition failed", style: .error)
                     }
                 }
             }
         }
+    }
+
+    @objc private func toggleQRCodes() {
+        let defaults = UserDefaults.standard
+        defaults.set(!defaults.bool(forKey: "scanQRCodes"), forKey: "scanQRCodes")
+    }
+
+    @objc private func toggleJoinLines() {
+        let defaults = UserDefaults.standard
+        defaults.set(!defaults.bool(forKey: "joinCapturedLines"), forKey: "joinCapturedLines")
     }
 
     @objc private func showClipboardHistory() {
